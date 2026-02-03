@@ -4,11 +4,14 @@ service cloud.firestore {
     function isSignedIn() {
       return request.auth != null;
     }
+
     function hasRole(role) {
       return isSignedIn() && request.auth.token.role == role;
     }
-    function isAdmin() { return hasRole('admin'); }
-    function isChecker() { return hasRole('checker'); }
+
+    function isAdmin() {
+      return hasRole('admin');
+    }
 
     match /users/{uid} {
       allow read: if isAdmin() || request.auth.uid == uid;
@@ -18,16 +21,16 @@ service cloud.firestore {
     }
 
     match /courses/{courseId} {
-      allow read: if isSignedIn();
+      allow read: if isAdmin() || (isSignedIn() && resource.data.isActive == true);
       allow write: if isAdmin();
 
       match /sessions/{sessionId} {
-        allow read: if isSignedIn();
+        allow read: if isAdmin() || (isSignedIn() && resource.data.isActive == true);
         allow write: if isAdmin();
       }
 
       match /materials/{materialId} {
-        allow read: if isSignedIn();
+        allow read: if isAdmin() || (isSignedIn() && resource.data.isActive == true);
         allow write: if isAdmin();
       }
     }
@@ -45,7 +48,7 @@ service cloud.firestore {
 
     match /attendance/{courseId}/sessions/{sessionId}/records/{uid} {
       allow read: if isAdmin();
-      allow write: if isAdmin();
+      allow write: if false;
     }
   }
 }

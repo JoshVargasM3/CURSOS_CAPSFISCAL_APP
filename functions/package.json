@@ -1,25 +1,29 @@
 {
   "name": "capfiscal-functions",
+  "private": true,
   "main": "lib/index.js",
+  "type": "commonjs",
   "engines": {
     "node": "18"
   },
   "scripts": {
     "build": "tsc",
-    "lint": "eslint .",
+    "lint": "eslint src --ext .ts",
     "serve": "firebase emulators:start --only functions",
-    "deploy": "firebase deploy --only functions"
+    "shell": "firebase functions:shell",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
   },
   "dependencies": {
-    "firebase-admin": "^12.0.0",
-    "firebase-functions": "^4.5.0",
+    "dotenv": "^16.4.5",
+    "firebase-admin": "^12.5.0",
+    "firebase-functions": "^4.7.0",
     "jsonwebtoken": "^9.0.2",
-    "stripe": "^14.24.0",
-    "uuid": "^9.0.1"
+    "stripe": "^16.4.0"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.6",
-    "@types/node": "^20.11.19",
-    "typescript": "^5.3.3"
+    "@types/node": "^20.11.30",
+    "typescript": "^5.4.5"
   }
 }

@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import '../../../services/providers.dart';
+
+import '../../../services/auth_service.dart';
+import '../../../widgets/app_scaffold.dart';
+import '../../../widgets/form_fields.dart';
+import '../../../widgets/primary_button.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -11,51 +15,53 @@ class LoginScreen extends ConsumerStatefulWidget {
 }
 
 class _LoginScreenState extends ConsumerState<LoginScreen> {
-  final emailController = TextEditingController();
-  final passwordController = TextEditingController();
-  String? errorMessage;
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _isLoading = false;
+  String? _error;
 
-  @override
-  void dispose() {
-    emailController.dispose();
-    passwordController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _login() async {
-    final auth = ref.read(firebaseAuthProvider);
-    setState(() => errorMessage = null);
+  Future<void> _submit() async {
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
     try {
-      await auth.signInWithEmailAndPassword(
-        email: emailController.text.trim(),
-        password: passwordController.text,
-      );
-    } catch (err) {
-      setState(() => errorMessage = err.toString());
+      await ref.read(authServiceProvider).signIn(
+            email: _emailController.text.trim(),
+            password: _passwordController.text,
+          );
+      if (mounted) {
+        context.go('/courses');
+      }
+    } catch (error) {
+      setState(() {
+        _error = error.toString();
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Ingreso')),
+    return AppScaffold(
+      title: 'Iniciar sesión',
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            TextField(
-              controller: emailController,
-              decoration: const InputDecoration(labelText: 'Email'),
-            ),
-            TextField(
-              controller: passwordController,
-              decoration: const InputDecoration(labelText: 'Contraseña'),
-              obscureText: true,
-            ),
-            const SizedBox(height: 16),
-            if (errorMessage != null)
-              Text(errorMessage!, style: const TextStyle(color: Colors.red)),
-            ElevatedButton(onPressed: _login, child: const Text('Ingresar')),
+            TextFieldGroup(label: 'Email', controller: _emailController, keyboardType: TextInputType.emailAddress),
+            TextFieldGroup(label: 'Contraseña', controller: _passwordController, obscureText: true),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(_error!, style: const TextStyle(color: Colors.red)),
+              ),
+            PrimaryButton(label: 'Entrar', onPressed: _isLoading ? null : _submit, isLoading: _isLoading),
             TextButton(
               onPressed: () => context.go('/register'),
               child: const Text('Crear cuenta'),
@@ -63,7 +69,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             TextButton(
               onPressed: () => context.go('/forgot'),
               child: const Text('Olvidé mi contraseña'),
-            )
+            ),
           ],
         ),
       ),

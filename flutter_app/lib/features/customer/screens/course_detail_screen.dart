@@ -1,12 +1,15 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
+
 import '../../../models/course.dart';
+import '../../../models/enrollment.dart';
 import '../../../models/session.dart';
+import '../../../services/auth_service.dart';
+import '../../../services/course_service.dart';
 import '../../../services/payment_service.dart';
-import '../../../services/providers.dart';
+import '../../../widgets/app_scaffold.dart';
+import '../../../widgets/primary_button.dart';
 
 class CourseDetailScreen extends ConsumerStatefulWidget {
   const CourseDetailScreen({super.key, required this.courseId});
@@ -18,120 +21,159 @@ class CourseDetailScreen extends ConsumerStatefulWidget {
 }
 
 class _CourseDetailScreenState extends ConsumerState<CourseDetailScreen> {
-  final selectedSessions = <String>{};
-  String? message;
+  final Set<String> _selectedSessions = {};
+  bool _isPaying = false;
+  String? _message;
 
   Future<void> _payFull() async {
-    setState(() => message = null);
+    setState(() {
+      _isPaying = true;
+      _message = null;
+    });
     try {
-      final paymentService = PaymentService(functions: ref.read(functionsProvider));
-      await paymentService.payFullCourse(courseId: widget.courseId);
-      setState(() => message = 'Pago iniciado. Espera confirmación.');
-    } catch (err) {
-      setState(() => message = err.toString());
+      await ref.read(paymentServiceProvider).payFull(courseId: widget.courseId);
+      setState(() {
+        _message = 'Pago iniciado. Espera la confirmación del webhook.';
+      });
+    } catch (error) {
+      setState(() {
+        _message = error.toString();
+      });
+    } finally {
+      setState(() {
+        _isPaying = false;
+      });
     }
   }
 
   Future<void> _paySessions() async {
-    if (selectedSessions.isEmpty) {
-      setState(() => message = 'Selecciona sesiones.');
+    if (_selectedSessions.isEmpty) {
+      setState(() {
+        _message = 'Selecciona al menos una sesión.';
+      });
       return;
     }
-    setState(() => message = null);
+    setState(() {
+      _isPaying = true;
+      _message = null;
+    });
     try {
-      final paymentService = PaymentService(functions: ref.read(functionsProvider));
-      await paymentService.paySessions(courseId: widget.courseId, sessionIds: selectedSessions.toList());
-      setState(() => message = 'Pago iniciado. Espera confirmación.');
-    } catch (err) {
-      setState(() => message = err.toString());
+      await ref.read(paymentServiceProvider).paySessions(
+            courseId: widget.courseId,
+            sessionIds: _selectedSessions.toList(),
+          );
+      setState(() {
+        _message = 'Pago iniciado. Espera la confirmación del webhook.';
+      });
+    } catch (error) {
+      setState(() {
+        _message = error.toString();
+      });
+    } finally {
+      setState(() {
+        _isPaying = false;
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final firestore = ref.watch(firestoreProvider);
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Detalle del curso'),
-        actions: [
-          IconButton(
-            onPressed: () => context.go('/customer/course/${widget.courseId}/qr'),
-            icon: const Icon(Icons.qr_code),
-          )
-        ],
-      ),
-      body: FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        future: firestore.doc('courses/${widget.courseId}').get(),
-        builder: (context, snapshot) {
-          if (!snapshot.hasData) {
+    final courseStream = ref.watch(courseServiceProvider).watchCourse(widget.courseId);
+    final sessionsStream = ref.watch(courseServiceProvider).watchSessions(widget.courseId);
+    final uid = ref.watch(authStateProvider).valueOrNull?.uid;
+
+    return AppScaffold(
+      title: 'Detalle del curso',
+      body: StreamBuilder<Course?>(
+        stream: courseStream,
+        builder: (context, courseSnapshot) {
+          if (!courseSnapshot.hasData) {
             return const Center(child: CircularProgressIndicator());
           }
-          final course = Course.fromDoc(snapshot.data!);
-          final format = DateFormat('dd/MM/yyyy HH:mm');
-          return Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(course.title, style: Theme.of(context).textTheme.headlineSmall),
-                Text(course.description),
-                const SizedBox(height: 8),
-                Text('Inicio: ${format.format(course.startDate)}'),
-                Text('Fin: ${format.format(course.endDate)}'),
-                const SizedBox(height: 16),
-                Text('Sesiones', style: Theme.of(context).textTheme.titleMedium),
-                Expanded(
-                  child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                    stream: firestore.collection('courses/${widget.courseId}/sessions').where('isActive', isEqualTo: true).snapshots(),
-                    builder: (context, sessionSnap) {
-                      if (!sessionSnap.hasData) {
-                        return const Center(child: CircularProgressIndicator());
-                      }
-                      final sessions = sessionSnap.data!.docs.map(CourseSession.fromDoc).toList();
-                      return ListView.builder(
-                        itemCount: sessions.length,
-                        itemBuilder: (context, index) {
-                          final session = sessions[index];
-                          final selected = selectedSessions.contains(session.id);
-                          return CheckboxListTile(
-                            value: selected,
-                            onChanged: (value) {
-                              setState(() {
-                                if (value == true) {
-                                  selectedSessions.add(session.id);
-                                } else {
-                                  selectedSessions.remove(session.id);
+          final course = courseSnapshot.data;
+          if (course == null) {
+            return const Center(child: Text('Curso no encontrado'));
+          }
+
+          return StreamBuilder<List<Session>>(
+            stream: sessionsStream,
+            builder: (context, sessionSnapshot) {
+              final sessions = sessionSnapshot.data ?? [];
+              return StreamBuilder<Enrollment?>(
+                stream: uid == null
+                    ? Stream<Enrollment?>.empty()
+                    : ref.watch(courseServiceProvider).watchEnrollment(widget.courseId, uid),
+                builder: (context, enrollmentSnapshot) {
+                  final enrollment = enrollmentSnapshot.data;
+                  final canPayFull = course.paymentModeAllowed != 'per_session_only';
+                  final canPaySessions = course.paymentModeAllowed != 'full_only';
+                  return ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      Text(course.title, style: Theme.of(context).textTheme.headlineSmall),
+                      const SizedBox(height: 8),
+                      Text(course.description),
+                      const SizedBox(height: 16),
+                      Text('Precio completo: MXN ${course.priceFull.toStringAsFixed(2)}'),
+                      const SizedBox(height: 16),
+                      if (enrollment != null)
+                        Card(
+                          child: ListTile(
+                            title: const Text('Estado de inscripción'),
+                            subtitle: Text(enrollment.status),
+                            trailing: enrollment.status == 'active'
+                                ? TextButton(
+                                    onPressed: () => context.go('/courses/${course.id}/qr'),
+                                    child: const Text('Ver QR'),
+                                  )
+                                : null,
+                          ),
+                        ),
+                      const SizedBox(height: 16),
+                      if (sessions.isNotEmpty) Text('Sesiones', style: Theme.of(context).textTheme.titleMedium),
+                      ...sessions.map(
+                        (session) => CheckboxListTile(
+                          title: Text(session.title),
+                          subtitle: Text('MXN ${session.price.toStringAsFixed(2)} | ${session.dateTime}'),
+                          value: _selectedSessions.contains(session.id),
+                          onChanged: canPaySessions
+                              ? (value) {
+                                  setState(() {
+                                    if (value == true) {
+                                      _selectedSessions.add(session.id);
+                                    } else {
+                                      _selectedSessions.remove(session.id);
+                                    }
+                                  });
                                 }
-                              });
-                            },
-                            title: Text(session.title),
-                            subtitle: Text('${format.format(session.dateTime)} - ${session.price.toStringAsFixed(2)}'),
-                          );
-                        },
-                      );
-                    },
-                  ),
-                ),
-                if (message != null) Text(message!, style: const TextStyle(color: Colors.indigo)),
-                Row(
-                  children: [
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed: course.paymentModeAllowed == 'per_session_only' ? null : _payFull,
-                        child: Text('Pagar curso (${course.priceFull.toStringAsFixed(2)})'),
+                              : null,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: course.paymentModeAllowed == 'full_only' ? null : _paySessions,
-                        child: const Text('Pagar sesiones'),
-                      ),
-                    )
-                  ],
-                )
-              ],
-            ),
+                      if (_message != null)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          child: Text(_message!, style: const TextStyle(color: Colors.blueGrey)),
+                        ),
+                      if (canPayFull)
+                        PrimaryButton(
+                          label: 'Pagar curso completo',
+                          onPressed: _isPaying ? null : _payFull,
+                          isLoading: _isPaying,
+                        ),
+                      if (canPaySessions)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: PrimaryButton(
+                            label: 'Pagar sesiones seleccionadas',
+                            onPressed: _isPaying ? null : _paySessions,
+                            isLoading: _isPaying,
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              );
+            },
           );
         },
       ),

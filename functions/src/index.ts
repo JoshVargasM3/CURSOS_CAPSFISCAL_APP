@@ -1,395 +1,446 @@
-import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
+import * as admin from 'firebase-admin';
+import dotenv from 'dotenv';
+import { getCourse, getSession, getUserProfile, db } from './firestore';
+import { requireAdmin, requireAuth, requireChecker } from './auth';
 import Stripe from 'stripe';
-import jwt from 'jsonwebtoken';
-import { v4 as uuidv4 } from 'uuid';
+import { getStripe } from './stripe';
+import { signQrToken, verifyQrToken } from './qr';
+import { PaymentType } from './types';
 
-admin.initializeApp();
-const db = admin.firestore();
+dotenv.config();
 
-const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
-const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-const qrSecret = process.env.QR_SECRET;
-const defaultCurrency = process.env.DEFAULT_CURRENCY || 'usd';
+const REGION = 'us-central1';
+const CURRENCY = 'mxn';
 
-if (!stripeSecretKey) {
-  throw new Error('Missing STRIPE_SECRET_KEY');
-}
-if (!qrSecret) {
-  throw new Error('Missing QR_SECRET');
-}
-
-const stripe = new Stripe(stripeSecretKey, { apiVersion: '2023-10-16' });
-
-function assertRole(context: functions.https.CallableContext, role: string) {
-  if (!context.auth) {
-    throw new functions.https.HttpsError('unauthenticated', 'Auth required');
-  }
-  const tokenRole = context.auth.token.role;
-  if (tokenRole !== role && tokenRole !== 'admin') {
-    throw new functions.https.HttpsError('permission-denied', 'Insufficient role');
-  }
-}
-
-async function getCourse(courseId: string) {
-  const courseSnap = await db.doc(`courses/${courseId}`).get();
-  if (!courseSnap.exists) {
-    throw new functions.https.HttpsError('not-found', 'Course not found');
-  }
-  return courseSnap;
-}
-
-async function getOrCreateEnrollment(uid: string, courseId: string, courseData: FirebaseFirestore.DocumentData) {
-  const enrollments = await db
-    .collection('enrollments')
-    .where('uid', '==', uid)
-    .where('courseId', '==', courseId)
-    .limit(1)
-    .get();
-
-  if (!enrollments.empty) {
-    return enrollments.docs[0];
-  }
-
-  const enrollmentRef = db.collection('enrollments').doc();
-  await enrollmentRef.set({
-    uid,
-    courseId,
-    stateId: courseData.stateId,
-    sedeId: courseData.sedeId,
-    status: 'pending',
-    paidFull: false,
-    sessionsPaid: [],
-    lastQrIssuedAt: null,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  });
-  return enrollmentRef.get();
-}
-
-export const setRole = functions.https.onCall(async (data, context) => {
-  assertRole(context, 'admin');
-  const { uid, role } = data as { uid?: string; role?: string };
+export const setRole = functions.region(REGION).https.onCall(async (data, context) => {
+  requireAdmin(context);
+  const uid = data?.uid as string | undefined;
+  const role = data?.role as string | undefined;
   if (!uid || !role) {
-    throw new functions.https.HttpsError('invalid-argument', 'uid and role required');
+    throw new functions.https.HttpsError('invalid-argument', 'uid and role are required');
   }
   if (!['admin', 'checker', 'customer'].includes(role)) {
-    throw new functions.https.HttpsError('invalid-argument', 'Invalid role');
+    throw new functions.https.HttpsError('invalid-argument', 'invalid role');
   }
   await admin.auth().setCustomUserClaims(uid, { role });
   return { ok: true };
 });
 
-export const createPaymentIntentFull = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError('unauthenticated', 'Auth required');
-  }
-  const { courseId } = data as { courseId?: string };
+export const createPaymentIntentFull = functions.region(REGION).https.onCall(async (data, context) => {
+  const uid = requireAuth(context);
+  const courseId = data?.courseId as string | undefined;
   if (!courseId) {
-    throw new functions.https.HttpsError('invalid-argument', 'courseId required');
+    throw new functions.https.HttpsError('invalid-argument', 'courseId is required');
   }
-  const courseSnap = await getCourse(courseId);
-  const courseData = courseSnap.data()!;
-  if (!courseData.isActive) {
-    throw new functions.https.HttpsError('failed-precondition', 'Course inactive');
+  const course = await getCourse(courseId);
+  if (!course || !course.data.isActive) {
+    throw new functions.https.HttpsError('not-found', 'Course not found');
   }
-  if (!['full_only', 'both'].includes(courseData.paymentModeAllowed)) {
-    throw new functions.https.HttpsError('failed-precondition', 'Full payment not allowed');
+  if (course.data.paymentModeAllowed === 'per_session_only') {
+    throw new functions.https.HttpsError('failed-precondition', 'Course does not allow full payment');
   }
 
-  const enrollmentSnap = await getOrCreateEnrollment(context.auth.uid, courseId, courseData);
   const paymentRef = db.collection('payments').doc();
-  const amount = Math.round(Number(courseData.priceFull) * 100);
-
-  const intent = await stripe.paymentIntents.create({
-    amount,
-    currency: defaultCurrency,
-    metadata: {
-      paymentId: paymentRef.id,
-      uid: context.auth.uid,
-      courseId,
-      type: 'full'
-    }
-  });
+  const amount = Math.round(course.data.priceFull * 100);
+  const stripe = getStripe();
 
   await paymentRef.set({
-    uid: context.auth.uid,
+    uid,
     courseId,
-    enrollmentId: enrollmentSnap.id,
-    type: 'full',
+    enrollmentId: null,
+    type: 'full' as PaymentType,
     sessionIds: [],
     amount,
-    currency: defaultCurrency,
+    currency: CURRENCY,
     provider: 'stripe',
-    stripePaymentIntentId: intent.id,
+    stripePaymentIntentId: null,
     status: 'pending',
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    confirmedAt: null
+    confirmedAt: null,
   });
 
-  return { clientSecret: intent.client_secret, paymentId: paymentRef.id };
-});
-
-export const createPaymentIntentSessions = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError('unauthenticated', 'Auth required');
-  }
-  const { courseId, sessionIds } = data as { courseId?: string; sessionIds?: string[] };
-  if (!courseId || !sessionIds || !Array.isArray(sessionIds) || sessionIds.length === 0) {
-    throw new functions.https.HttpsError('invalid-argument', 'courseId and sessionIds required');
-  }
-  const courseSnap = await getCourse(courseId);
-  const courseData = courseSnap.data()!;
-  if (!courseData.isActive) {
-    throw new functions.https.HttpsError('failed-precondition', 'Course inactive');
-  }
-  if (!['per_session_only', 'both'].includes(courseData.paymentModeAllowed)) {
-    throw new functions.https.HttpsError('failed-precondition', 'Session payment not allowed');
-  }
-
-  const sessionsSnap = await db
-    .collection(`courses/${courseId}/sessions`)
-    .where(admin.firestore.FieldPath.documentId(), 'in', sessionIds)
-    .get();
-  if (sessionsSnap.empty) {
-    throw new functions.https.HttpsError('not-found', 'Sessions not found');
-  }
-  let amount = 0;
-  sessionsSnap.docs.forEach((doc) => {
-    const price = Number(doc.data().price || 0);
-    amount += Math.round(price * 100);
-  });
-
-  const enrollmentSnap = await getOrCreateEnrollment(context.auth.uid, courseId, courseData);
-  const paymentRef = db.collection('payments').doc();
-
-  const intent = await stripe.paymentIntents.create({
+  const paymentIntent = await stripe.paymentIntents.create({
     amount,
-    currency: defaultCurrency,
+    currency: CURRENCY,
     metadata: {
       paymentId: paymentRef.id,
-      uid: context.auth.uid,
+      uid,
       courseId,
-      type: 'sessions'
-    }
+      type: 'full',
+    },
   });
 
-  await paymentRef.set({
-    uid: context.auth.uid,
-    courseId,
-    enrollmentId: enrollmentSnap.id,
-    type: 'sessions',
-    sessionIds,
-    amount,
-    currency: defaultCurrency,
-    provider: 'stripe',
-    stripePaymentIntentId: intent.id,
-    status: 'pending',
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    confirmedAt: null
+  await paymentRef.update({
+    stripePaymentIntentId: paymentIntent.id,
+    status: paymentIntent.status,
   });
 
-  return { clientSecret: intent.client_secret, paymentId: paymentRef.id };
+  return { clientSecret: paymentIntent.client_secret, paymentId: paymentRef.id };
 });
 
-export const stripeWebhook = functions.https.onRequest(async (req, res) => {
-  if (!stripeWebhookSecret) {
-    res.status(500).send('Missing STRIPE_WEBHOOK_SECRET');
-    return;
-  }
-  const sig = req.headers['stripe-signature'];
-  if (!sig || typeof sig !== 'string') {
-    res.status(400).send('Missing signature');
-    return;
-  }
+export const createPaymentIntentSessions = functions
+  .region(REGION)
+  .https.onCall(async (data, context) => {
+    const uid = requireAuth(context);
+    const courseId = data?.courseId as string | undefined;
+    const sessionIds = (data?.sessionIds as string[]) ?? [];
+    if (!courseId || sessionIds.length === 0) {
+      throw new functions.https.HttpsError('invalid-argument', 'courseId and sessionIds are required');
+    }
+    const course = await getCourse(courseId);
+    if (!course || !course.data.isActive) {
+      throw new functions.https.HttpsError('not-found', 'Course not found');
+    }
+    if (course.data.paymentModeAllowed === 'full_only') {
+      throw new functions.https.HttpsError('failed-precondition', 'Course does not allow per-session payment');
+    }
 
-  let event: Stripe.Event;
-  try {
-    event = stripe.webhooks.constructEvent(req.rawBody, sig, stripeWebhookSecret);
-  } catch (err) {
-    res.status(400).send(`Webhook Error: ${(err as Error).message}`);
-    return;
-  }
+    const sessions = await Promise.all(
+      sessionIds.map((sessionId) => getSession(courseId, sessionId))
+    );
+    const invalid = sessions.find((session) => !session || !session.data.isActive);
+    if (invalid) {
+      throw new functions.https.HttpsError('failed-precondition', 'One or more sessions are invalid');
+    }
 
-  const intent = event.data.object as Stripe.PaymentIntent;
-  const paymentId = intent.metadata?.paymentId;
-  if (!paymentId) {
-    res.status(200).send('No payment metadata');
-    return;
-  }
+    const amount = Math.round(
+      sessions.reduce((sum, session) => sum + (session?.data.price ?? 0), 0) * 100
+    );
 
-  const paymentRef = db.doc(`payments/${paymentId}`);
-  const paymentSnap = await paymentRef.get();
-  if (!paymentSnap.exists) {
-    res.status(200).send('Payment not found');
-    return;
-  }
-  const paymentData = paymentSnap.data()!;
-  const enrollmentRef = db.doc(`enrollments/${paymentData.enrollmentId}`);
+    const paymentRef = db.collection('payments').doc();
+    const stripe = getStripe();
 
-  if (event.type === 'payment_intent.succeeded') {
-    await paymentRef.update({
-      status: 'succeeded',
-      confirmedAt: admin.firestore.FieldValue.serverTimestamp()
+    await paymentRef.set({
+      uid,
+      courseId,
+      enrollmentId: null,
+      type: 'sessions' as PaymentType,
+      sessionIds,
+      amount,
+      currency: CURRENCY,
+      provider: 'stripe',
+      stripePaymentIntentId: null,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      confirmedAt: null,
     });
-    if (paymentData.type === 'full') {
-      await enrollmentRef.set(
-        {
-          paidFull: true,
-          status: 'active',
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        },
-        { merge: true }
-      );
-    } else {
-      await enrollmentRef.set(
-        {
-          sessionsPaid: admin.firestore.FieldValue.arrayUnion(...paymentData.sessionIds),
-          status: 'active',
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        },
-        { merge: true }
-      );
-    }
-  }
 
-  if (event.type === 'payment_intent.payment_failed') {
-    await paymentRef.update({ status: 'failed' });
-  }
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount,
+      currency: CURRENCY,
+      metadata: {
+        paymentId: paymentRef.id,
+        uid,
+        courseId,
+        type: 'sessions',
+        sessionIds: sessionIds.join(','),
+      },
+    });
 
-  if (event.type === 'charge.refunded') {
-    await paymentRef.update({ status: 'refunded' });
-  }
+    await paymentRef.update({
+      stripePaymentIntentId: paymentIntent.id,
+      status: paymentIntent.status,
+    });
 
-  res.status(200).send('ok');
-});
+    return { clientSecret: paymentIntent.client_secret, paymentId: paymentRef.id };
+  });
 
-export const issueCourseQrToken = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError('unauthenticated', 'Auth required');
-  }
-  const { courseId } = data as { courseId?: string };
+export const issueCourseQrToken = functions.region(REGION).https.onCall(async (data, context) => {
+  const uid = requireAuth(context);
+  const courseId = data?.courseId as string | undefined;
   if (!courseId) {
-    throw new functions.https.HttpsError('invalid-argument', 'courseId required');
+    throw new functions.https.HttpsError('invalid-argument', 'courseId is required');
   }
-  const courseSnap = await getCourse(courseId);
-  const courseData = courseSnap.data()!;
-  const enrollmentSnap = await getOrCreateEnrollment(context.auth.uid, courseId, courseData);
-  const enrollmentData = enrollmentSnap.data()!;
-  const endDate = courseData.endDate?.toDate?.();
-  if (!endDate) {
-    throw new functions.https.HttpsError('failed-precondition', 'Course endDate missing');
-  }
-  const expDate = new Date(endDate.getTime() + 7 * 24 * 60 * 60 * 1000);
-  const token = jwt.sign(
-    {
-      uid: context.auth.uid,
-      courseId,
-      exp: Math.floor(expDate.getTime() / 1000),
-      jti: uuidv4()
-    },
-    qrSecret
-  );
-  await enrollmentSnap.ref.set(
-    {
-      lastQrIssuedAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    },
-    { merge: true }
-  );
-  return { token, expiresAt: expDate.toISOString(), paidFull: enrollmentData.paidFull };
-});
-
-export const validateCourseQrToken = functions.https.onCall(async (data, context) => {
-  assertRole(context, 'checker');
-  const { token, sessionId } = data as { token?: string; sessionId?: string };
-  if (!token) {
-    throw new functions.https.HttpsError('invalid-argument', 'token required');
-  }
-
-  let payload: { uid: string; courseId: string };
-  try {
-    payload = jwt.verify(token, qrSecret) as { uid: string; courseId: string };
-  } catch (err) {
-    if ((err as Error).name === 'TokenExpiredError') {
-      return { allowed: false, reason: 'TOKEN_EXPIRED' };
-    }
-    return { allowed: false, reason: 'INVALID_TOKEN' };
-  }
-
-  const enrollmentQuery = await db
+  const enrollmentSnap = await db
     .collection('enrollments')
-    .where('uid', '==', payload.uid)
-    .where('courseId', '==', payload.courseId)
+    .where('uid', '==', uid)
+    .where('courseId', '==', courseId)
+    .where('status', '==', 'active')
     .limit(1)
     .get();
 
-  if (enrollmentQuery.empty) {
-    return { allowed: false, reason: 'NOT_ENROLLED' };
+  if (enrollmentSnap.empty) {
+    throw new functions.https.HttpsError('failed-precondition', 'Enrollment not active');
   }
 
-  const enrollmentSnap = enrollmentQuery.docs[0];
-  const enrollmentData = enrollmentSnap.data();
-  const courseSnap = await getCourse(payload.courseId);
-  const courseData = courseSnap.data()!;
+  const expiresIn = 60 * 15;
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const token = signQrToken({ uid, courseId, issuedAt }, expiresIn);
+  const exp = issuedAt + expiresIn;
 
-  if (!courseData.isActive) {
-    return { allowed: false, reason: 'COURSE_INACTIVE' };
+  await enrollmentSnap.docs[0].ref.update({
+    lastQrIssuedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  return { token, exp };
+});
+
+export const validateCourseQrToken = functions.region(REGION).https.onCall(async (data, context) => {
+  requireChecker(context);
+  const token = data?.token as string | undefined;
+  const sessionId = data?.sessionId as string | undefined;
+  if (!token || !sessionId) {
+    throw new functions.https.HttpsError('invalid-argument', 'token and sessionId are required');
   }
 
-  const paidFull = Boolean(enrollmentData.paidFull);
-  const sessionsPaid: string[] = enrollmentData.sessionsPaid || [];
-  const sessionAllowed = sessionId ? sessionsPaid.includes(sessionId) : false;
-
-  if (!paidFull && sessionId && !sessionAllowed) {
-    return { allowed: false, reason: 'SESSION_NOT_PAID' };
+  let decoded;
+  try {
+    decoded = verifyQrToken(token);
+  } catch (error) {
+    const reason =
+      error instanceof Error && error.name === 'TokenExpiredError' ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN';
+    return {
+      allowed: false,
+      reason,
+      alreadyCheckedIn: false,
+      userDisplay: null,
+      courseDisplay: null,
+      paymentSnapshot: null,
+    };
   }
 
-  if (!paidFull && !sessionAllowed) {
-    return { allowed: false, reason: 'PAYMENT_REQUIRED' };
+  const { uid, courseId } = decoded;
+  if (!uid || !courseId) {
+    throw new functions.https.HttpsError('failed-precondition', 'INVALID_TOKEN');
   }
 
+  const course = await getCourse(courseId);
+  if (!course || !course.data.isActive) {
+    return {
+      allowed: false,
+      reason: 'COURSE_INACTIVE',
+      alreadyCheckedIn: false,
+      userDisplay: null,
+      courseDisplay: null,
+      paymentSnapshot: null,
+    };
+  }
+
+  const session = await getSession(courseId, sessionId);
+  if (!session || !session.data.isActive) {
+    return {
+      allowed: false,
+      reason: 'SESSION_NOT_PAID',
+      alreadyCheckedIn: false,
+      userDisplay: null,
+      courseDisplay: { title: course.data.title, sedeId: course.data.sedeId, stateId: course.data.stateId },
+      paymentSnapshot: null,
+    };
+  }
+
+  const enrollmentSnap = await db
+    .collection('enrollments')
+    .where('uid', '==', uid)
+    .where('courseId', '==', courseId)
+    .where('status', '==', 'active')
+    .limit(1)
+    .get();
+
+  if (enrollmentSnap.empty) {
+    return {
+      allowed: false,
+      reason: 'NOT_ENROLLED',
+      alreadyCheckedIn: false,
+      userDisplay: null,
+      courseDisplay: { title: course.data.title, sedeId: course.data.sedeId, stateId: course.data.stateId },
+      paymentSnapshot: null,
+    };
+  }
+
+  const enrollment = enrollmentSnap.docs[0].data();
+  const paidFull = Boolean(enrollment.paidFull);
+  const sessionsPaid = (enrollment.sessionsPaid as string[]) ?? [];
+  const sessionsPaidContainsThisSession = sessionsPaid.includes(sessionId);
+  const paymentSnapshot = {
+    paidFull,
+    sessionsPaidCount: sessionsPaid.length,
+    sessionsPaidContainsThisSession,
+  };
+
+  if (!paidFull && sessionsPaid.length === 0) {
+    return {
+      allowed: false,
+      reason: 'PAYMENT_REQUIRED',
+      alreadyCheckedIn: false,
+      userDisplay: null,
+      courseDisplay: { title: course.data.title, sedeId: course.data.sedeId, stateId: course.data.stateId },
+      paymentSnapshot,
+    };
+  }
+
+  if (!paidFull && !sessionsPaidContainsThisSession) {
+    return {
+      allowed: false,
+      reason: 'SESSION_NOT_PAID',
+      alreadyCheckedIn: false,
+      userDisplay: null,
+      courseDisplay: { title: course.data.title, sedeId: course.data.sedeId, stateId: course.data.stateId },
+      paymentSnapshot,
+    };
+  }
+
+  const recordRef = db.doc(`attendance/${courseId}/sessions/${sessionId}/records/${uid}`);
   let alreadyCheckedIn = false;
-  if (sessionId) {
-    const attendanceRef = db.doc(`attendance/${payload.courseId}/sessions/${sessionId}/records/${payload.uid}`);
-    const attendanceSnap = await attendanceRef.get();
-    if (attendanceSnap.exists) {
+
+  await db.runTransaction(async (tx) => {
+    const recordSnap = await tx.get(recordRef);
+    if (recordSnap.exists) {
       alreadyCheckedIn = true;
-    } else {
-      await attendanceRef.set({
-        uid: payload.uid,
-        enrollmentId: enrollmentSnap.id,
-        checkedInAt: admin.firestore.FieldValue.serverTimestamp(),
-        checkedInBy: context.auth?.uid || null,
-        validationSnapshot: {
-          paidFull,
-          sessionsPaidCount: sessionsPaid.length,
-          allowedReason: paidFull ? 'PAID_FULL' : 'SESSION_PAID'
-        }
-      });
+      return;
     }
+    tx.set(recordRef, {
+      uid,
+      enrollmentId: enrollmentSnap.docs[0].id,
+      checkedInAt: admin.firestore.FieldValue.serverTimestamp(),
+      checkedInBy: context.auth?.uid ?? null,
+      validationSnapshot: {
+        paidFull,
+        sessionsPaidCount: sessionsPaid.length,
+        allowedReason: 'OK',
+      },
+    });
+  });
+
+  if (alreadyCheckedIn) {
+    return {
+      allowed: false,
+      reason: 'ALREADY_CHECKED_IN',
+      alreadyCheckedIn: true,
+      userDisplay: null,
+      courseDisplay: { title: course.data.title, sedeId: course.data.sedeId, stateId: course.data.stateId },
+      paymentSnapshot,
+    };
   }
 
-  const userSnap = await db.doc(`users/${payload.uid}`).get();
-  const userData = userSnap.data() || {};
+  const userDisplay = await getUserProfile(uid);
 
   return {
     allowed: true,
-    reason: alreadyCheckedIn ? 'ALREADY_CHECKED_IN' : 'ALLOWED',
-    userDisplay: {
-      fullName: userData.fullName || '',
-      email: userData.email || '',
-      phone: userData.phone || ''
-    },
-    courseDisplay: {
-      title: courseData.title || '',
-      sedeId: courseData.sedeId || '',
-      stateId: courseData.stateId || ''
-    },
-    paymentSnapshot: {
-      paidFull,
-      sessionsPaidCount: sessionsPaid.length,
-      sessionsPaidContainsThisSession: sessionId ? sessionsPaid.includes(sessionId) : false
-    }
+    reason: null,
+    alreadyCheckedIn: false,
+    userDisplay,
+    courseDisplay: { title: course.data.title, sedeId: course.data.sedeId, stateId: course.data.stateId },
+    paymentSnapshot,
   };
+});
+
+export const stripeWebhook = functions.region(REGION).https.onRequest(async (req, res) => {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) {
+    res.status(500).send('Missing STRIPE_WEBHOOK_SECRET');
+    return;
+  }
+  const signature = req.headers['stripe-signature'];
+  if (!signature || Array.isArray(signature)) {
+    res.status(400).send('Missing stripe signature');
+    return;
+  }
+
+  const stripe = getStripe();
+  let event: Stripe.Event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.rawBody, signature, secret);
+  } catch (error) {
+    res.status(400).send('Invalid signature');
+    return;
+  }
+
+  if (event.type.startsWith('payment_intent')) {
+    const paymentIntent = event.data.object as { id: string; status: string; metadata?: Record<string, string> };
+
+    const paymentId = paymentIntent.metadata?.paymentId;
+    const uid = paymentIntent.metadata?.uid;
+    const courseId = paymentIntent.metadata?.courseId;
+    const type = paymentIntent.metadata?.type as PaymentType | undefined;
+    const sessionIds = paymentIntent.metadata?.sessionIds
+      ? paymentIntent.metadata?.sessionIds.split(',').filter(Boolean)
+      : [];
+
+    let paymentRef = paymentId ? db.collection('payments').doc(paymentId) : null;
+    if (paymentRef && !(await paymentRef.get()).exists) {
+      paymentRef = null;
+    }
+    if (!paymentRef) {
+      const snap = await db
+        .collection('payments')
+        .where('stripePaymentIntentId', '==', paymentIntent.id)
+        .limit(1)
+        .get();
+      if (!snap.empty) {
+        paymentRef = snap.docs[0].ref;
+      }
+    }
+
+    if (paymentRef) {
+      await paymentRef.set(
+        {
+          status: paymentIntent.status,
+          confirmedAt:
+            paymentIntent.status === 'succeeded'
+              ? admin.firestore.FieldValue.serverTimestamp()
+              : null,
+        },
+        { merge: true }
+      );
+    }
+
+    if (event.type === 'payment_intent.succeeded' && uid && courseId && type) {
+      const enrollmentSnap = await db
+        .collection('enrollments')
+        .where('uid', '==', uid)
+        .where('courseId', '==', courseId)
+        .limit(1)
+        .get();
+
+      const course = await getCourse(courseId);
+      if (course) {
+        let enrollmentId: string | null = null;
+        const payload = {
+          uid,
+          courseId,
+          stateId: course.data.stateId,
+          sedeId: course.data.sedeId,
+          status: 'active',
+          paidFull: type === 'full',
+          sessionsPaid: type === 'sessions' ? sessionIds : [],
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+
+        if (enrollmentSnap.empty) {
+          const newRef = await db.collection('enrollments').add({
+            ...payload,
+            paidFull: type === 'full',
+            sessionsPaid: type === 'sessions' ? sessionIds : [],
+            status: 'active',
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          enrollmentId = newRef.id;
+        } else {
+          const ref = enrollmentSnap.docs[0].ref;
+          enrollmentId = ref.id;
+          await ref.set(
+            {
+              paidFull: type === 'full' ? true : enrollmentSnap.docs[0].data().paidFull,
+              sessionsPaid: type === 'sessions'
+                ? Array.from(new Set([...(enrollmentSnap.docs[0].data().sessionsPaid ?? []), ...sessionIds]))
+                : enrollmentSnap.docs[0].data().sessionsPaid ?? [],
+              status: 'active',
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
+
+        if (paymentRef && enrollmentId) {
+          await paymentRef.set({ enrollmentId }, { merge: true });
+        }
+      }
+    }
+  }
+
+  res.json({ received: true });
 });

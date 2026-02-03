@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import '../../../services/providers.dart';
-import '../../../services/user_service.dart';
+
+import '../../../services/auth_service.dart';
+import '../../../widgets/app_scaffold.dart';
+import '../../../widgets/form_fields.dart';
+import '../../../widgets/primary_button.dart';
 
 class RegisterScreen extends ConsumerStatefulWidget {
   const RegisterScreen({super.key});
@@ -12,81 +15,64 @@ class RegisterScreen extends ConsumerStatefulWidget {
 }
 
 class _RegisterScreenState extends ConsumerState<RegisterScreen> {
-  final fullNameController = TextEditingController();
-  final emailController = TextEditingController();
-  final phoneController = TextEditingController();
-  final passwordController = TextEditingController();
-  String? errorMessage;
+  final _nameController = TextEditingController();
+  final _emailController = TextEditingController();
+  final _phoneController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _isLoading = false;
+  String? _error;
 
-  @override
-  void dispose() {
-    fullNameController.dispose();
-    emailController.dispose();
-    phoneController.dispose();
-    passwordController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _register() async {
-    final auth = ref.read(firebaseAuthProvider);
-    final firestore = ref.read(firestoreProvider);
-    final userService = UserService(firestore);
-    setState(() => errorMessage = null);
+  Future<void> _submit() async {
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
     try {
-      final cred = await auth.createUserWithEmailAndPassword(
-        email: emailController.text.trim(),
-        password: passwordController.text,
-      );
-      await userService.createProfile(
-        uid: cred.user!.uid,
-        fullName: fullNameController.text.trim(),
-        email: emailController.text.trim(),
-        phone: phoneController.text.trim(),
-      );
+      await ref.read(authServiceProvider).register(
+            fullName: _nameController.text.trim(),
+            email: _emailController.text.trim(),
+            phone: _phoneController.text.trim(),
+            password: _passwordController.text,
+          );
       if (mounted) {
-        context.go('/customer');
+        context.go('/courses');
       }
-    } catch (err) {
-      setState(() => errorMessage = err.toString());
+    } catch (error) {
+      setState(() {
+        _error = error.toString();
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Registro')),
+    return AppScaffold(
+      title: 'Registro',
       body: Padding(
         padding: const EdgeInsets.all(16),
-        child: SingleChildScrollView(
-          child: Column(
-            children: [
-              TextField(
-                controller: fullNameController,
-                decoration: const InputDecoration(labelText: 'Nombre completo'),
+        child: Column(
+          children: [
+            TextFieldGroup(label: 'Nombre completo', controller: _nameController),
+            TextFieldGroup(label: 'Email', controller: _emailController, keyboardType: TextInputType.emailAddress),
+            TextFieldGroup(label: 'Teléfono', controller: _phoneController, keyboardType: TextInputType.phone),
+            TextFieldGroup(label: 'Contraseña', controller: _passwordController, obscureText: true),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(_error!, style: const TextStyle(color: Colors.red)),
               ),
-              TextField(
-                controller: emailController,
-                decoration: const InputDecoration(labelText: 'Email'),
-              ),
-              TextField(
-                controller: phoneController,
-                decoration: const InputDecoration(labelText: 'Teléfono'),
-              ),
-              TextField(
-                controller: passwordController,
-                decoration: const InputDecoration(labelText: 'Contraseña'),
-                obscureText: true,
-              ),
-              const SizedBox(height: 16),
-              if (errorMessage != null)
-                Text(errorMessage!, style: const TextStyle(color: Colors.red)),
-              ElevatedButton(onPressed: _register, child: const Text('Crear cuenta')),
-              TextButton(
-                onPressed: () => context.go('/login'),
-                child: const Text('Volver a ingreso'),
-              )
-            ],
-          ),
+            PrimaryButton(label: 'Crear cuenta', onPressed: _isLoading ? null : _submit, isLoading: _isLoading),
+            TextButton(
+              onPressed: () => context.go('/login'),
+              child: const Text('Ya tengo cuenta'),
+            ),
+          ],
         ),
       ),
     );

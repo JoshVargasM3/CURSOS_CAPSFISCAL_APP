@@ -2,14 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter_stripe/flutter_stripe.dart';
+
 import 'core/app_config.dart';
 import 'core/app_router.dart';
-import 'services/firebase_service.dart';
+import 'firebase_options.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final config = AppConfig.fromEnvironment();
-  await Firebase.initializeApp(options: buildFirebaseOptions(config.firebaseOptions));
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   Stripe.publishableKey = config.stripePublishableKey;
   runApp(const ProviderScope(child: CapfiscalApp()));
 }

@@ -1,13 +1,25 @@
-import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_functions/firebase_functions.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-FirebaseOptions buildFirebaseOptions(Map<String, dynamic> raw) {
-  return FirebaseOptions(
-    apiKey: raw['apiKey'] as String,
-    appId: raw['appId'] as String,
-    messagingSenderId: raw['messagingSenderId'] as String,
-    projectId: raw['projectId'] as String,
-    authDomain: raw['authDomain'] as String?,
-    storageBucket: raw['storageBucket'] as String?,
-    measurementId: raw['measurementId'] as String?,
-  );
+import '../core/app_config.dart';
+
+class FirebaseService {
+  FirebaseService(this.config);
+
+  final AppConfig config;
+
+  FirebaseAuth get auth => FirebaseAuth.instance;
+  FirebaseFirestore get db => FirebaseFirestore.instance;
+  FirebaseFunctions get functions => FirebaseFunctions.instanceFor(region: config.functionsRegion);
 }
+
+final appConfigProvider = Provider<AppConfig>((ref) {
+  return AppConfig.fromEnvironment();
+});
+
+final firebaseServiceProvider = Provider<FirebaseService>((ref) {
+  final config = ref.read(appConfigProvider);
+  return FirebaseService(config);
+});
