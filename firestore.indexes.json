@@ -1,13 +1,36 @@
 {
   "indexes": [
     {
+      "collectionGroup": "courses",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "isActive", "order": "ASCENDING"},
+        {"fieldPath": "startDate", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "sessions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "dateTime", "order": "ASCENDING"}
+      ]
+    },
+    {
       "collectionGroup": "enrollments",
       "queryScope": "COLLECTION",
       "fields": [
-        {"fieldPath": "stateId", "order": "ASCENDING"},
-        {"fieldPath": "sedeId", "order": "ASCENDING"},
         {"fieldPath": "courseId", "order": "ASCENDING"},
-        {"fieldPath": "status", "order": "ASCENDING"}
+        {"fieldPath": "status", "order": "ASCENDING"},
+        {"fieldPath": "sedeId", "order": "ASCENDING"},
+        {"fieldPath": "stateId", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "payments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "uid", "order": "ASCENDING"},
+        {"fieldPath": "createdAt", "order": "DESCENDING"}
       ]
     }
   ],

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
-import '../../../services/providers.dart';
+
 import '../../../services/qr_service.dart';
+import '../../../widgets/app_scaffold.dart';
+import '../../../widgets/primary_button.dart';
 
 class CourseQrScreen extends ConsumerStatefulWidget {
   const CourseQrScreen({super.key, required this.courseId});
@@ -14,44 +16,66 @@ class CourseQrScreen extends ConsumerStatefulWidget {
 }
 
 class _CourseQrScreenState extends ConsumerState<CourseQrScreen> {
-  String? token;
-  String? message;
+  String? _token;
+  int? _exp;
+  bool _isLoading = false;
+  String? _error;
 
-  Future<void> _generate() async {
-    setState(() => message = null);
+  Future<void> _load() async {
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
     try {
-      final service = QrService(ref.read(functionsProvider));
-      final result = await service.issueCourseQrToken(widget.courseId);
+      final data = await ref.read(qrServiceProvider).issueCourseQrToken(widget.courseId);
       setState(() {
-        token = result['token'] as String;
+        _token = data['token'] as String?;
+        _exp = data['exp'] as int?;
       });
-    } catch (err) {
-      setState(() => message = err.toString());
+    } catch (error) {
+      setState(() {
+        _error = error.toString();
+      });
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
     }
   }
 
   @override
   void initState() {
     super.initState();
-    _generate();
+    _load();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Mi QR del curso')),
+    return AppScaffold(
+      title: 'Mi QR',
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              if (token != null) QrImageView(data: token!, size: 240),
-              if (message != null) Text(message!),
-              const SizedBox(height: 12),
-              ElevatedButton(onPressed: _generate, child: const Text('Regenerar QR')),
-              const SizedBox(height: 8),
-              const Text('El QR no contiene datos personales.'),
+              if (_token != null)
+                QrImageView(
+                  data: _token!,
+                  size: 240,
+                ),
+              if (_exp != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text('Expira: ${DateTime.fromMillisecondsSinceEpoch(_exp! * 1000)}'),
+                ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(_error!, style: const TextStyle(color: Colors.red)),
+                ),
+              const SizedBox(height: 16),
+              PrimaryButton(label: 'Actualizar QR', onPressed: _isLoading ? null : _load, isLoading: _isLoading),
             ],
           ),
         ),

@@ -1,13 +1,5 @@
 {
-  "functionsRegion": "us-central1",
-  "stripePublishableKey": "pk_test_...",
-  "firebaseOptions": {
-    "apiKey": "REPLACE_ME",
-    "appId": "REPLACE_ME",
-    "messagingSenderId": "REPLACE_ME",
-    "projectId": "REPLACE_ME",
-    "authDomain": "REPLACE_ME.firebaseapp.com",
-    "storageBucket": "REPLACE_ME.appspot.com",
-    "measurementId": "REPLACE_ME"
-  }
+  "APP_CONFIG": "dev",
+  "FUNCTIONS_REGION": "us-central1",
+  "STRIPE_PUBLISHABLE_KEY": "pk_test_..."
 }

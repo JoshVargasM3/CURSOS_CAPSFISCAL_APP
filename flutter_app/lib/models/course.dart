@@ -19,25 +19,39 @@ class Course {
   final String description;
   final String stateId;
   final String sedeId;
-  final DateTime startDate;
-  final DateTime endDate;
+  final String startDate;
+  final String endDate;
   final double priceFull;
   final String paymentModeAllowed;
   final bool isActive;
 
-  factory Course.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
-    final data = doc.data()!;
+  factory Course.fromFirestore(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data() ?? {};
     return Course(
       id: doc.id,
       title: data['title'] as String? ?? '',
       description: data['description'] as String? ?? '',
       stateId: data['stateId'] as String? ?? '',
       sedeId: data['sedeId'] as String? ?? '',
-      startDate: (data['startDate'] as Timestamp).toDate(),
-      endDate: (data['endDate'] as Timestamp).toDate(),
+      startDate: data['startDate'] as String? ?? '',
+      endDate: data['endDate'] as String? ?? '',
       priceFull: (data['priceFull'] as num?)?.toDouble() ?? 0,
-      paymentModeAllowed: data['paymentModeAllowed'] as String? ?? 'full_only',
+      paymentModeAllowed: data['paymentModeAllowed'] as String? ?? 'both',
       isActive: data['isActive'] as bool? ?? false,
     );
+  }
+
+  Map<String, dynamic> toFirestore() {
+    return {
+      'title': title,
+      'description': description,
+      'stateId': stateId,
+      'sedeId': sedeId,
+      'startDate': startDate,
+      'endDate': endDate,
+      'priceFull': priceFull,
+      'paymentModeAllowed': paymentModeAllowed,
+      'isActive': isActive,
+    };
   }
 }
