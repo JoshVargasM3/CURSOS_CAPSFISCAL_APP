@@ -1,0 +1,15 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "enrollments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "stateId", "order": "ASCENDING"},
+        {"fieldPath": "sedeId", "order": "ASCENDING"},
+        {"fieldPath": "courseId", "order": "ASCENDING"},
+        {"fieldPath": "status", "order": "ASCENDING"}
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
